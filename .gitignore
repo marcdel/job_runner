@@ -28,3 +28,5 @@ job_runner-*.tar
 # Intellij
 .idea/
 *.iml
+
+.env

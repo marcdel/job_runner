@@ -24,6 +24,9 @@ defmodule JobRunner.MixProject do
     [
       # {:dep_from_hexpm, "~> 0.3.0"},
       # {:dep_from_git, git: "https://github.com/elixir-lang/my_dep.git", tag: "0.1.0"}
+      {:opentelemetry_exporter, "~> 1.8"},
+      {:opentelemetry, "~> 1.5"},
+      {:open_telemetry_decorator, "~> 1.5"}
     ]
   end
 end
