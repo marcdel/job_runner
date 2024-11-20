@@ -7,13 +7,11 @@ defmodule JobRunner.Application do
 
   @impl true
   def start(_type, _args) do
-    :ets.new(JobWatcher.table_name(), [:named_table, :public, :set])
-
     children = [
       # Starts a worker by calling: JobRunner.Worker.start_link(arg)
       # {JobRunner.Worker, arg}
-      {JobWatcher, []},
-      {FakeK8s, []}
+      {Registry, keys: :unique, name: JobWatcherRegistry},
+      {DynamicSupervisor, strategy: :one_for_one, name: JobWatcherSupervisor}
     ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html
