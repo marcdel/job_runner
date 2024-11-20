@@ -2,18 +2,19 @@ defmodule JobRunner do
   use OpenTelemetryDecorator
 
   @decorate with_span("JobRunner.run_job", include: [:job_run_id])
-  def run_job(job_run_id \\ :rand.uniform(100)) do
+  def run_job(job_run_id \\ :rand.uniform(100), deadline \\ :rand.uniform(10)) do
     :ok = FakeK8s.start_job(job_run_id)
-    watch_and_wait(job_run_id, :rand.uniform(10))
+    {:ok, _} = JobWatcher.start(self(), job_run_id)
+    watch_and_wait(job_run_id, deadline)
   end
 
   @decorate with_span("JobRunner.watch_and_wait", include: [:job_run_id])
   defp watch_and_wait(job_run_id, deadline) do
-    {:ok, _} = JobWatcher.watch_job(self(), job_run_id, deadline)
+    :ok = JobWatcher.watch_job(job_run_id, deadline)
 
     receive do
-      :job_completed ->
-        O11y.add_event("job_completed", %{job_run_id: job_run_id})
+      :job_successful ->
+        O11y.add_event("job_successful", %{job_run_id: job_run_id})
         0
 
       :job_failed ->

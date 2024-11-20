@@ -3,6 +3,6 @@ defmodule JobRunnerTest do
   doctest JobRunner
 
   test "greets the world" do
-    assert JobRunner.run_job(:rand.uniform(100)) == :world
+    assert JobRunner.run_job(:rand.uniform(100)) == 0
   end
 end

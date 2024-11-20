@@ -13,7 +13,8 @@ defmodule JobWatcher do
       :trace_ctx,
       :job_run_id,
       :deadline,
-      :start_time
+      :start_time,
+      :ref
     ]
   end
 
@@ -22,7 +23,7 @@ defmodule JobWatcher do
   end
 
   def init(state) do
-    {:ok, state, {:continue, :start_watching}}
+    {:ok, state}
   end
 
   def child_spec(state) do
@@ -37,52 +38,88 @@ defmodule JobWatcher do
     {:via, Registry, {JobWatcherRegistry, job_run_id}}
   end
 
-  @decorate with_span("JobWatcher.watch_job", include: [:state])
-  def watch_job(parent_pid, job_run_id, deadline) do
+  @decorate with_span("JobWatcher.start", include: [:state])
+  def start(parent_pid, job_run_id) do
     state = %State{
       parent_pid: parent_pid,
       trace_ctx: OpenTelemetry.Ctx.get_current(),
       job_run_id: job_run_id,
-      deadline: deadline,
       start_time: Time.utc_now()
     }
 
     DynamicSupervisor.start_child(JobWatcherSupervisor, {__MODULE__, state})
   end
 
-  def handle_continue(:start_watching, state) do
-    %{
-      parent_pid: parent_pid,
-      trace_ctx: trace_ctx,
-      job_run_id: job_run_id,
-      deadline: deadline
-    } = state
+  @decorate with_span("JobWatcher.watch_job", include: [:job_run_id])
+  def watch_job(job_run_id, deadline) do
+    GenServer.call(via(job_run_id), {:update_state, %{deadline: deadline, trace_ctx: OpenTelemetry.Ctx.get_current()}})
+    GenServer.call(via(job_run_id), :start_watching)
+  end
 
-    OpenTelemetry.Ctx.attach(trace_ctx)
-    parent_span = O11y.start_span("JobWatcher.start_watching")
+  def handle_call({:update_state, new_values}, _from, state) do
+    new_state = %{state | start_time: Time.utc_now(), deadline: new_values.deadline, trace_ctx: new_values.trace_ctx}
+    {:reply, :ok, new_state}
+  end
 
-    try do
-      O11y.set_attributes(job_run_id: job_run_id, state: state)
+  # In this case the task is already running, so we just return :ok.
+  def handle_call(:start_watching, _from, %{ref: ref} = state)
+      when is_reference(ref) do
+    {:reply, :ok, state}
+  end
 
-      case FakeK8s.wait_until(job_run_id, deadline) do
-        {:ok, :job_successful} ->
-          send(parent_pid, :job_completed)
+  def handle_call(:start_watching, _from, %{ref: nil} = state) do
+    task =
+      Task.Supervisor.async_nolink(JobWatcherTaskSupervisor, fn ->
+        OpenTelemetry.Ctx.attach(state.trace_ctx)
+        FakeK8s.wait_until(state.job_run_id, state.deadline)
+      end)
 
-        {:ok, :job_failed} ->
-          O11y.set_error(:job_failed)
-          send(parent_pid, :job_failed)
+    new_state = %{state | ref: task.ref}
 
-        {:error, :timeout} ->
-          O11y.set_error(:job_timed_out)
-          send(parent_pid, :job_timed_out)
-      end
+    {:reply, :ok, new_state}
+  end
 
-      {:stop, :normal, state}
-    rescue
-      error -> {:stop, error, state}
-    after
-      O11y.end_span(parent_span)
+  # The task completed successfully
+  def handle_info({ref, result}, %{ref: ref} = state) do
+    # We don't care about the DOWN message now, so let's demonitor and flush it
+    Process.demonitor(ref, [:flush])
+
+    case result do
+      {:ok, :job_successful} ->
+        O11y.set_attributes(result: :job_successful)
+        send(state.parent_pid, :job_successful)
+
+      {:ok, :job_failed} ->
+        O11y.set_error(:job_failed)
+        send(state.parent_pid, :job_failed)
+
+      {:error, :timeout} ->
+        O11y.set_error(:job_timed_out)
+        send(state.parent_pid, :job_timed_out)
     end
+
+    {:noreply, %{state | ref: nil}}
+  end
+
+  # The task failed
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{ref: ref} = state) do
+    # Log and possibly restart the task...
+    Logger.error("JobWatcher task failed. reason: #{inspect(reason)}, state: #{inspect(state)}")
+    O11y.set_error(reason)
+
+    exponential_backoff()
+
+    new_deadline = recalculate_deadline(state.deadline, state.start_time)
+
+    task =
+      Task.Supervisor.async_nolink(JobWatcherTaskSupervisor, fn ->
+        OpenTelemetry.Ctx.attach(state.trace_ctx)
+        FakeK8s.wait_until(state.job_run_id, new_deadline)
+      end)
+
+    new_state = %{state | ref: task.ref, start_time: Time.utc_now(), deadline: new_deadline}
+
+    {:noreply, new_state}
   end
 
   def terminate(reason, state) do
@@ -92,7 +129,7 @@ defmodule JobWatcher do
       O11y.set_error(reason)
       Logger.error("JobWatcher terminated. reason: #{inspect(reason)}, state: #{inspect(state)}")
 
-      remaining_deadline = calculate_remaining_deadline(state.deadline, state.start_time)
+      remaining_deadline = recalculate_deadline(state.deadline, state.start_time)
       O11y.set_attributes(remaining_deadline: remaining_deadline)
 
       send(state.parent_pid, {:job_watcher_terminated, reason, remaining_deadline})
@@ -101,12 +138,14 @@ defmodule JobWatcher do
     end)
   end
 
-  defp calculate_remaining_deadline(nil, _start_time), do: nil
+  defp exponential_backoff do
+    Process.sleep(:timer.seconds(3))
+  end
 
-  @decorate with_span("JobWatcher.calculate_remaining_deadline",
-              include: [:deadline, :start_time, :current_time, :result]
-            )
-  defp calculate_remaining_deadline(deadline, start_time) do
+  defp recalculate_deadline(nil, _start_time), do: nil
+
+  @decorate with_span("JobWatcher.recalculate_deadline", include: [:deadline, :start_time, :current_time, :result])
+  defp recalculate_deadline(deadline, start_time) do
     current_time = Time.utc_now()
     deadline - Time.diff(current_time, start_time, :second)
   end

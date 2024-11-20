@@ -11,7 +11,8 @@ defmodule JobRunner.Application do
       # Starts a worker by calling: JobRunner.Worker.start_link(arg)
       # {JobRunner.Worker, arg}
       {Registry, keys: :unique, name: JobWatcherRegistry},
-      {DynamicSupervisor, strategy: :one_for_one, name: JobWatcherSupervisor}
+      {DynamicSupervisor, strategy: :one_for_one, name: JobWatcherSupervisor},
+      {Task.Supervisor, name: JobWatcherTaskSupervisor}
     ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html

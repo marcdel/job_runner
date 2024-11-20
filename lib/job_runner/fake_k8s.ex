@@ -6,8 +6,8 @@ defmodule FakeK8s do
     :ok
   end
 
-  @decorate with_span("FakeK8s.wait_until", include: [:job_run_id])
-  def wait_until(job_run_id, deadline) do
+  @decorate with_span("FakeK8s.wait_until", include: [:_job_run_id])
+  def wait_until(_job_run_id, _deadline) do
     Process.sleep(:timer.seconds(1))
 
     job_successful? = :rand.uniform() > 0.50
