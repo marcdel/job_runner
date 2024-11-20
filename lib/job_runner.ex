@@ -4,7 +4,7 @@ defmodule JobRunner do
   @decorate with_span("JobRunner.run_job", include: [:job_run_id])
   def run_job(job_run_id \\ :rand.uniform(100)) do
     :ok = FakeK8s.start_job(job_run_id)
-    watch_and_wait(job_run_id, :rand.uniform(1000))
+    watch_and_wait(job_run_id, :rand.uniform(10))
   end
 
   @decorate with_span("JobRunner.watch_and_wait", include: [:job_run_id])

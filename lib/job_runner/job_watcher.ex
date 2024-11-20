@@ -50,7 +50,6 @@ defmodule JobWatcher do
     DynamicSupervisor.start_child(JobWatcherSupervisor, {__MODULE__, state})
   end
 
-  @decorate with_span("JobWatcher.start_watching", include: [:state])
   def handle_continue(:start_watching, state) do
     %{
       parent_pid: parent_pid,
@@ -59,52 +58,56 @@ defmodule JobWatcher do
       deadline: deadline
     } = state
 
-    O11y.set_attributes(job_run_id: job_run_id)
     OpenTelemetry.Ctx.attach(trace_ctx)
-    O11y.set_attributes(job_run_id: job_run_id)
+    parent_span = O11y.start_span("JobWatcher.start_watching")
 
-    case FakeK8s.wait_until(job_run_id, deadline) do
-      {:ok, :job_successful} ->
-        send(parent_pid, :job_completed)
+    try do
+      O11y.set_attributes(job_run_id: job_run_id, state: state)
 
-      {:ok, :job_failed} ->
-        O11y.set_error(:job_failed)
-        send(parent_pid, :job_failed)
+      case FakeK8s.wait_until(job_run_id, deadline) do
+        {:ok, :job_successful} ->
+          send(parent_pid, :job_completed)
 
-      {:error, :timeout} ->
-        O11y.set_error(:job_timed_out)
-        send(parent_pid, :job_timed_out)
+        {:ok, :job_failed} ->
+          O11y.set_error(:job_failed)
+          send(parent_pid, :job_failed)
+
+        {:error, :timeout} ->
+          O11y.set_error(:job_timed_out)
+          send(parent_pid, :job_timed_out)
+      end
+
+      {:stop, :normal, state}
+    rescue
+      error -> {:stop, error, state}
+    after
+      O11y.end_span(parent_span)
     end
-
-    {:stop, :normal, state}
-  rescue
-    error -> {:stop, error, state}
   end
 
-  @decorate with_span("JobWatcher.terminate")
-  def terminate(:finished_watching, state) do
-    O11y.set_attributes(reason: :finished_watching, state: state)
-    :ok
-  end
-
-  @decorate with_span("JobWatcher.terminate")
   def terminate(reason, state) do
-    OpenTelemetry.Ctx.attach(state.trace_ctx)
-    O11y.set_attributes(reason: reason, state: state)
-    O11y.set_error(reason)
-    Logger.error("JobWatcher terminated. reason: #{inspect(reason)}, state: #{inspect(state)}")
+    O11y.with_span("JobWatcher.terminate", fn ->
+      OpenTelemetry.Ctx.attach(state.trace_ctx)
+      O11y.set_attributes(reason: reason, state: state)
+      O11y.set_error(reason)
+      Logger.error("JobWatcher terminated. reason: #{inspect(reason)}, state: #{inspect(state)}")
 
-    remaining_deadline = calculate_remaining_deadline(state.deadline, state.start_time)
-    O11y.set_attributes(remaining_deadline: remaining_deadline)
+      remaining_deadline = calculate_remaining_deadline(state.deadline, state.start_time)
+      O11y.set_attributes(remaining_deadline: remaining_deadline)
 
-    send(state.parent_pid, {:job_watcher_terminated, reason, remaining_deadline})
+      send(state.parent_pid, {:job_watcher_terminated, reason, remaining_deadline})
 
-    :ok
+      :ok
+    end)
   end
 
   defp calculate_remaining_deadline(nil, _start_time), do: nil
 
+  @decorate with_span("JobWatcher.calculate_remaining_deadline",
+              include: [:deadline, :start_time, :current_time, :result]
+            )
   defp calculate_remaining_deadline(deadline, start_time) do
-    deadline - Time.diff(Time.utc_now(), start_time, :second)
+    current_time = Time.utc_now()
+    deadline - Time.diff(current_time, start_time, :second)
   end
 end

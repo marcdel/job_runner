@@ -8,8 +8,10 @@ defmodule FakeK8s do
 
   @decorate with_span("FakeK8s.wait_until", include: [:job_run_id])
   def wait_until(job_run_id, deadline) do
-    job_successful? = :rand.uniform() > 0.25
-    watch_successful? = :rand.uniform() > 0.25
+    Process.sleep(:timer.seconds(1))
+
+    job_successful? = :rand.uniform() > 0.50
+    watch_successful? = :rand.uniform() > 0.75
 
     if !watch_successful? do
       raise "watch failed"
