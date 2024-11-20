@@ -47,17 +47,30 @@ defmodule JobWatcher do
       start_time: Time.utc_now()
     }
 
-    DynamicSupervisor.start_child(JobWatcherSupervisor, {__MODULE__, state})
+    {:ok, pid} = DynamicSupervisor.start_child(JobWatcherSupervisor, {__MODULE__, state})
+    ref = Process.monitor(pid)
+
+    {:ok, ref}
   end
 
   @decorate with_span("JobWatcher.watch_job", include: [:job_run_id])
   def watch_job(job_run_id, deadline) do
-    GenServer.call(via(job_run_id), {:update_state, %{deadline: deadline, trace_ctx: OpenTelemetry.Ctx.get_current()}})
+    GenServer.call(
+      via(job_run_id),
+      {:update_state, %{deadline: deadline, trace_ctx: OpenTelemetry.Ctx.get_current()}}
+    )
+
     GenServer.call(via(job_run_id), :start_watching)
   end
 
   def handle_call({:update_state, new_values}, _from, state) do
-    new_state = %{state | start_time: Time.utc_now(), deadline: new_values.deadline, trace_ctx: new_values.trace_ctx}
+    new_state = %{
+      state
+      | start_time: Time.utc_now(),
+        deadline: new_values.deadline,
+        trace_ctx: new_values.trace_ctx
+    }
+
     {:reply, :ok, new_state}
   end
 
@@ -122,29 +135,16 @@ defmodule JobWatcher do
     {:noreply, new_state}
   end
 
-  def terminate(reason, state) do
-    O11y.with_span("JobWatcher.terminate", fn ->
-      OpenTelemetry.Ctx.attach(state.trace_ctx)
-      O11y.set_attributes(reason: reason, state: state)
-      O11y.set_error(reason)
-      Logger.error("JobWatcher terminated. reason: #{inspect(reason)}, state: #{inspect(state)}")
-
-      remaining_deadline = recalculate_deadline(state.deadline, state.start_time)
-      O11y.set_attributes(remaining_deadline: remaining_deadline)
-
-      send(state.parent_pid, {:job_watcher_terminated, reason, remaining_deadline})
-
-      :ok
-    end)
-  end
-
+  # TODO: max retries
   defp exponential_backoff do
     Process.sleep(:timer.seconds(3))
   end
 
   defp recalculate_deadline(nil, _start_time), do: nil
 
-  @decorate with_span("JobWatcher.recalculate_deadline", include: [:deadline, :start_time, :current_time, :result])
+  @decorate with_span("JobWatcher.recalculate_deadline",
+              include: [:deadline, :start_time, :current_time, :result]
+            )
   defp recalculate_deadline(deadline, start_time) do
     current_time = Time.utc_now()
     deadline - Time.diff(current_time, start_time, :second)
